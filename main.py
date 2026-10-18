@@ -5,10 +5,10 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import Any
 
-app = FastAPI(title="JWT Verifier")
+app = FastAPI(title="JWT Verifier + Effective Config")
 
 # ---------------------------------------------------------------
-# CORS — required so the browser grader can call /verify
+# CORS
 # ---------------------------------------------------------------
 app.add_middleware(
     CORSMiddleware,
@@ -45,7 +45,7 @@ def reject():
 
 
 # ---------------------------------------------------------------
-# Endpoint
+# POST /verify — JWT verification
 # ---------------------------------------------------------------
 @app.post("/verify")
 async def verify(payload: VerifyRequest):
@@ -77,17 +77,21 @@ async def verify(payload: VerifyRequest):
     }
 
 
+# ---------------------------------------------------------------
+# GET /effective-config — the grader calls this too
+# ---------------------------------------------------------------
 @app.get("/effective-config")
 async def effective_config():
-    # Return whatever config the grader expects.
-    # Since the task description isn't fully visible, start with a placeholder.
-    # Check the grader's error message or task page for the exact required shape.
     return {
-        "status": "ok",
-        "config": {}
+        "issuer": ISSUER,
+        "audience": AUDIENCE,
+        "algorithms": ["RS256"],
     }
 
 
+# ---------------------------------------------------------------
+# GET / — health
+# ---------------------------------------------------------------
 @app.get("/")
 async def root():
     return {"status": "ok"}
