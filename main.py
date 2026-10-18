@@ -1,11 +1,27 @@
 import jwt
-from fastapi import FastAPI, Request
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import Any
 
-app = FastAPI()
+app = FastAPI(title="JWT Verifier")
 
+# ---------------------------------------------------------------
+# CORS — required so the browser grader can call /verify
+# ---------------------------------------------------------------
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["*"],
+    expose_headers=["Content-Type"],
+)
+
+# ---------------------------------------------------------------
+# Assigned values
+# ---------------------------------------------------------------
 ISSUER = "https://idp.exam.local"
 AUDIENCE = "tds-7adcqonz.apps.exam.local"
 
@@ -28,6 +44,9 @@ def reject():
     return JSONResponse(status_code=401, content={"valid": False})
 
 
+# ---------------------------------------------------------------
+# Endpoint
+# ---------------------------------------------------------------
 @app.post("/verify")
 async def verify(payload: VerifyRequest):
     token = payload.token.strip()
