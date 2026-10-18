@@ -1,222 +1,96 @@
 import os
-import yaml
-import jwt
 from pathlib import Path
-from typing import Any, Optional
-from fastapi import FastAPI, Request
+from typing import List
+
+from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
-from pydantic import BaseModel
 
-app = FastAPI(title="JWT Verifier + Effective Config")
+# Your assigned OS-level layer (used if not set in Vercel dashboard)
+os.environ.setdefault("APP_PORT", "8688")
+os.environ.setdefault("APP_DEBUG", "true")
 
-# ---------------------------------------------------------------
-# CORS
-# ---------------------------------------------------------------
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,
-    allow_methods=["GET", "POST", "OPTIONS"],
-    allow_headers=["*"],
-    expose_headers=["Content-Type"],
-)
+APP_ENV = os.environ.get("APP_ENV", "development")
+BASE = Path(__file__).parent
 
-# ---------------------------------------------------------------
-# JWT values
-# ---------------------------------------------------------------
-ISSUER = "https://idp.exam.local"
-AUDIENCE = "tds-7adcqonz.apps.exam.local"
+DEFAULTS = {"port": 8000, "workers": 1, "debug": False,
+            "log_level": "info", "api_key": "default-secret-000"}
 
-PUBLIC_KEY = """-----BEGIN PUBLIC KEY-----
-MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA2okOHspNjgA+2rTLbeuY
-cxiP/hG8C6Sb9iwg3yiLAA4HCnpITcbWCSelbvbYGuc3EbNy4xFyf5Cbj5DHJMID
-EkryOgyd2giIIIBOUBj8S63uGcnRpOBh9NFatfNwheKuzsPuVNldu6A9cNteNpXc
-WyJjG2axVfmq7i6SuKr1JoWYG7xTTAvKPujSl4OtsQfO3h5NepzdfXpr28oNnzfW
-ed+zclR6BcmNNo/WVfJ4xyCLSf0BCOgdTgW6PdaChd1l9VDetJZVEgC5tkyvXsfI
-SI6iyrYbKR0NEBSqq4XkadEjsCs4F1RncsS4LlgniT7GlkL9Mce3b0wGLs9/7ZIX
-dQIDAQAB
------END PUBLIC KEY-----"""
+YAML_FALLBACK = {"port": 8250, "api_key": "key-re8mwl5lc0"}
+DOTENV_FALLBACK = "APP_DEBUG=false\nAPP_LOG_LEVEL=info\n"
+
+ALIASES = {"num_workers": "workers"}
+TRUE = {"true", "1", "yes", "on"}
+
+app = FastAPI()
+app.add_middleware(CORSMiddleware, allow_origins=["*"],
+                   allow_methods=["*"], allow_headers=["*"])
 
 
-class VerifyRequest(BaseModel):
-    token: str
+def norm_key(k: str) -> str:
+    k = k.strip().lower()
+    if k.startswith("app_"):
+        k = k[4:]
+    return ALIASES.get(k, k)
 
 
-def reject():
-    return JSONResponse(status_code=401, content={"valid": False})
+def coerce(key, val):
+    if key in ("port", "workers"):
+        return int(str(val).strip())
+    if key == "debug":
+        return str(val).strip().lower() in TRUE
+    return str(val)
 
 
-# ---------------------------------------------------------------
-# Config defaults
-# ---------------------------------------------------------------
-DEFAULTS = {
-    "port": 8000,
-    "workers": 2,
-    "debug": False,
-    "log_level": "info",
-    "api_key": "",
-}
-
-
-def load_yaml_config(env: str) -> dict:
-    """Load config.<env>.yaml from the current directory."""
-    path = Path(f"config.{env}.yaml")
-    if path.exists():
-        try:
-            with open(path, "r") as f:
-                data = yaml.safe_load(f) or {}
-                return data if isinstance(data, dict) else {}
-        except Exception:
-            pass
-    return {}
-
-
-def load_dotenv() -> dict:
-    """Parse .env file manually (simple key=value)."""
-    path = Path(".env")
-    result = {}
-    if path.exists():
-        try:
-            with open(path, "r") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line or line.startswith("#") or "=" not in line:
-                        continue
-                    key, _, value = line.partition("=")
-                    key = key.strip()
-                    value = value.strip().strip('"').strip("'")
-                    result[key] = value
-        except Exception:
-            pass
-    return result
-
-
-def load_os_env() -> dict:
-    """Read OS env vars with APP_ prefix."""
-    result = {}
-    for key, value in os.environ.items():
-        if key.startswith("APP_"):
-            config_key = key[4:].lower()  # APP_PORT -> port
-            result[config_key] = value
-    return result
-
-
-def coerce_value(key: str, value: Any) -> Any:
-    """Apply type coercion based on the default's type."""
-    if key not in DEFAULTS:
-        return value
-
-    target = DEFAULTS[key]
-
-    if isinstance(target, bool):
-        if isinstance(value, bool):
-            return value
-        if isinstance(value, str):
-            return value.lower() in ("true", "1", "yes", "on")
-        return bool(value)
-
-    if isinstance(target, int):
-        if isinstance(value, int) and not isinstance(value, bool):
-            return value
-        return int(value)
-
-    if isinstance(target, float):
-        return float(value)
-
-    if isinstance(target, str):
-        return str(value)
-
-    return value
-
-
-def parse_set_params(request: Request) -> dict:
-    """Parse ?set=key=value from query params, supporting multiple set params."""
-    result = {}
-    set_values = request.query_params.getlist("set")
-    for item in set_values:
-        if "=" in item:
-            key, _, value = item.partition("=")
-            result[key.strip()] = value.strip()
-    return result
-
-
-def mask_api_key(value: str) -> str:
-    """Mask api_key: keep first 4 chars, mask the rest."""
-    if not value:
-        return "****"
-    if len(value) <= 4:
-        return "****"
-    return value[:4] + "****"
-
-
-# ---------------------------------------------------------------
-# POST /verify
-# ---------------------------------------------------------------
-@app.post("/verify")
-async def verify(payload: VerifyRequest):
-    token = payload.token.strip()
-    if not token:
-        return reject()
-
+def load_yaml():
+    p = BASE / f"config.{APP_ENV}.yaml"
     try:
-        claims = jwt.decode(
-            token,
-            PUBLIC_KEY,
-            algorithms=["RS256"],
-            issuer=ISSUER,
-            audience=AUDIENCE,
-            options={"require": ["exp", "iss", "aud"]},
-        )
+        import yaml
+        if p.exists():
+            return yaml.safe_load(p.read_text()) or {}
     except Exception:
-        return reject()
-
-    aud_claim = claims.get("aud", "")
-    if isinstance(aud_claim, list):
-        aud_claim = aud_claim[0] if aud_claim else ""
-
-    return {
-        "valid": True,
-        "email": claims.get("email", ""),
-        "sub": claims.get("sub", ""),
-        "aud": aud_claim,
-    }
+        pass
+    return YAML_FALLBACK
 
 
-# ---------------------------------------------------------------
-# GET /effective-config
-# ---------------------------------------------------------------
+def load_dotenv():
+    p = BASE / ".env"
+    text = p.read_text() if p.exists() else DOTENV_FALLBACK
+    out = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        out[norm_key(k)] = v.strip().strip('"').strip("'")
+    return out
+
+
+def load_os_env():
+    out = {}
+    for k, v in os.environ.items():
+        if k.startswith("APP_") and k != "APP_ENV":
+            out[norm_key(k)] = v
+    return out
+
+
 @app.get("/effective-config")
-async def effective_config(request: Request):
-    # Determine environment (default to "dev")
-    env = os.environ.get("APP_ENV", "dev")
-
-    # Merge layers: defaults → config.<env>.yaml → .env → OS env → set params
+def effective_config(set: List[str] = Query(default=[])):
     merged = dict(DEFAULTS)
-    merged.update(load_yaml_config(env))
-    merged.update(load_dotenv())
-    merged.update(load_os_env())
-    merged.update(parse_set_params(request))
+    for layer in (load_yaml(), load_dotenv(), load_os_env()):
+        for k, v in layer.items():
+            merged[norm_key(str(k))] = v
 
-    # Apply type coercion
+    for item in set:
+        if "=" not in item:
+            continue
+        k, v = item.split("=", 1)
+        merged[norm_key(k)] = v
+
     result = {}
-    for key in DEFAULTS:
-        if key in merged:
-            try:
-                result[key] = coerce_value(key, merged[key])
-            except (ValueError, TypeError):
-                result[key] = DEFAULTS[key]
-
-    # Mask api_key in response
-    if "api_key" in result:
-        result["api_key"] = mask_api_key(result["api_key"])
-
+    for k, v in merged.items():
+        try:
+            result[k] = coerce(k, v)
+        except (ValueError, TypeError):
+            result[k] = coerce(k, DEFAULTS.get(k, 0)) if k in ("port", "workers") else v
+    result["api_key"] = "****"
     return result
-
-
-# ---------------------------------------------------------------
-# GET / — health
-# ---------------------------------------------------------------
-@app.get("/")
-async def root():
-    return {"status": "ok"}
